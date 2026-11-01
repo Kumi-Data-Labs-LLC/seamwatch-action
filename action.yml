@@ -1,0 +1,109 @@
+name: seamwatch
+description: Cross-repo schema guardrails and SQL FinOps checks for dbt projects.
+author: Kumi Data Labs
+branding:
+  icon: shield
+  color: blue
+
+inputs:
+  command:
+    description: "sync-dbt (analytics repo, on push to main), check-ddl (backend repo PRs) or check-sql (analytics repo PRs)."
+    required: true
+  api-key:
+    description: "seamwatch API key (sg_live_...). Store it as a repository secret."
+    required: true
+  api-url:
+    description: "seamwatch API base URL."
+    required: true
+  github-token:
+    description: "Token used to post the PR comment and suggestions (needs pull-requests: write)."
+    required: false
+    default: ${{ github.token }}
+  config:
+    description: "Path to .seamwatch.yml."
+    required: false
+    default: .seamwatch.yml
+  base:
+    description: "Ref or commit to diff against (default: the pull request's base commit)."
+    required: false
+    default: ""
+  manifest:
+    description: "Path to a compiled manifest.json (default from .seamwatch.yml, else target/manifest.json)."
+    required: false
+    default: ""
+  migration-files:
+    description: "check-ddl only: newline-separated SQL files to check instead of discovering migrations from the diff (e.g. Alembic --sql output)."
+    required: false
+    default: ""
+  python-version:
+    description: "Python used to run the CLI."
+    required: false
+    default: "3.12"
+  upload-report:
+    description: "check-ddl and check-sql: upload the full report (report.md, report.json) as a workflow artifact."
+    required: false
+    default: "true"
+
+runs:
+  using: composite
+  steps:
+    # update-environment: false leaves the job's own Python (with dbt) first on PATH for later steps.
+    - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+      id: python
+      with:
+        python-version: ${{ inputs.python-version }}
+        update-environment: false
+
+    # A private virtualenv with the CLI's dependencies pinned (packages/cli/constraints.txt), so neither
+    # the job's packages nor a new release of a dependency can change or break the CLI.
+    - name: Install seamwatch CLI
+      id: install
+      shell: bash
+      env:
+        PYTHON: ${{ steps.python.outputs.python-path }}
+      run: |
+        set -euo pipefail
+        venv="${RUNNER_TEMP}/seamwatch-venv"
+        "$PYTHON" -m venv "$venv"
+        bin="$venv/bin"; [[ -d "$venv/Scripts" ]] && bin="$venv/Scripts"
+        "$bin/python" -m pip install --quiet --disable-pip-version-check \
+          -c "${GITHUB_ACTION_PATH}/packages/cli/constraints.txt" "${GITHUB_ACTION_PATH}/packages/cli"
+        echo "seamwatch=$bin/seamwatch" >> "$GITHUB_OUTPUT"
+
+    - name: Run seamwatch ${{ inputs.command }}
+      shell: bash
+      env:
+        SEAMWATCH_API_KEY: ${{ inputs.api-key }}
+        SEAMWATCH_API_URL: ${{ inputs.api-url }}
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        INPUT_COMMAND: ${{ inputs.command }}
+        INPUT_CONFIG: ${{ inputs.config }}
+        INPUT_BASE: ${{ inputs.base }}
+        INPUT_MANIFEST: ${{ inputs.manifest }}
+        INPUT_MIGRATION_FILES: ${{ inputs.migration-files }}
+        SEAMWATCH_REPORT_DIR: ${{ github.workspace }}/seamwatch-report
+        SEAMWATCH_BIN: ${{ steps.install.outputs.seamwatch }}
+      run: |
+        set -euo pipefail
+        case "$INPUT_COMMAND" in
+          sync-dbt|check-ddl|check-sql) ;;
+          *) echo "::error title=seamwatch::unknown command '$INPUT_COMMAND'"; exit 2 ;;
+        esac
+        args=("$INPUT_COMMAND" --config "$INPUT_CONFIG")
+        if [[ -n "$INPUT_BASE" && "$INPUT_COMMAND" != "sync-dbt" ]]; then args+=(--base "$INPUT_BASE"); fi
+        if [[ -n "$INPUT_MANIFEST" && "$INPUT_COMMAND" != "check-ddl" ]]; then args+=(--manifest "$INPUT_MANIFEST"); fi
+        if [[ "$INPUT_COMMAND" == "check-ddl" ]]; then
+          while IFS= read -r file; do
+            [[ -n "$file" ]] && args+=(--migration-file "$file")
+          done <<< "$INPUT_MIGRATION_FILES"
+        fi
+        "$SEAMWATCH_BIN" "${args[@]}"
+
+    - name: Upload seamwatch report
+      if: ${{ always() && inputs.upload-report == 'true' && inputs.command != 'sync-dbt' }}
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      with:
+        name: seamwatch-report-${{ inputs.command }}-${{ github.job }}
+        path: ${{ github.workspace }}/seamwatch-report/
+        if-no-files-found: ignore
+        retention-days: 30

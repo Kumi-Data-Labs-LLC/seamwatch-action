@@ -1,0 +1,36 @@
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[project]
+name = "seamwatch"
+version = "0.1.0"
+description = "Thin-client CLI for seamwatch: sync dbt lineage and run schema / FinOps checks in CI."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "typer>=0.13",  # 0.12 cannot parse `Path | None` options
+    "httpx>=0.27,<1",
+    "pyyaml>=6.0.1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[project.scripts]
+seamwatch = "seamwatch.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["seamwatch"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 140
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+ignore = ["E501", "B008"]
